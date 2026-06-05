@@ -56,7 +56,6 @@ def load_volume(patient_dir, patient_id, modality):
     path = find_volume(patient_dir, patient_id, modality)
     img = nib.load(str(path))
     data = img.get_fdata(dtype=np.float32)
-    # print(f"Loaded {modality:5s}: {path.name} | shape={data.shape} | dtype={data.dtype}")
     return data, img
 
 def resample_volume(volume, original_spacing, target_spacing=(1,1,1), order=1):

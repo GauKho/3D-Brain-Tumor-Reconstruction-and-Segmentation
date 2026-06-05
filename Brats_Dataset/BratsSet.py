@@ -50,7 +50,7 @@ class BraTSDataset3D(Dataset):
                 resampled_volumes = volumes
                 resampled_seg     = seg
 
-            # Resize toàn bộ volume về target_size bằng zoom — KHÔNG crop
+            # Resize toàn bộ volume về target_size bằng zoom — KHÔNG cropping
             current_shape = resampled_seg.shape  # e.g. (240, 240, 155)
             zoom_factors  = tuple(t / c for t, c in zip(self.target_size, current_shape))
 
