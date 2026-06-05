@@ -1,7 +1,7 @@
 # An Application of U-Net Convolutional Network for 3D Brain Tumor Reconstruction and Segmentation using Reinforcement Learning
 
 ## 📌 Project Overview
-This repository contains the source code and research components for advanced 3D Brain Tumor Semantic Segmentation and Volumetric Reconstruction utilizing the **BraTS 2020** dataset. 
+This repository contains the source code and research components for advanced 3D Brain Tumor Semantic Segmentation and Volumetric Reconstruction utilizing the **BraTS** dataset. 
 
 The core architecture leverages a customized **3D U-Net Convolutional Neural Network** integrated with **Reinforcement Learning (RL)** policies to dynamically optimize loss weights, multi-scale feature selection, and regional refinement boundaries. This approach mitigates severe class imbalance inherent in medical imaging (Enhancing Tumor, Tumor Core, Whole Tumor) and enhances the spatial alignment of the 3D reconstructed output.
 
