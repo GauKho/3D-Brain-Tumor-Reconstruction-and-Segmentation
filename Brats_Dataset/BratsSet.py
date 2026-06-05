@@ -74,3 +74,4 @@ class BraTSDataset3D(Dataset):
         except Exception as e:
             print(f"[WARN] Lỗi khi xử lý {patient_id}: {e}")
             return torch.zeros((3, *self.target_size)), torch.zeros(self.target_size).long(), patient_id
+
