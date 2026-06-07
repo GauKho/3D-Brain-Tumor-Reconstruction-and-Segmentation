@@ -61,3 +61,27 @@ def load_volume(patient_dir, patient_id, modality):
 def resample_volume(volume, original_spacing, target_spacing=(1,1,1), order=1):
     zoom_factors = [o/t for o,t in zip(original_spacing, target_spacing)]
     return nd_zoom(volume, zoom_factors, order=order)
+
+# Hàm bổ trợ cắt ảnh lấy tâm (Center Crop hoặc Pad nếu thiếu)
+def crop_or_pad_3d(volume, target_shape=(128, 128, 128)):
+    current_shape = volume.shape
+    new_volume = np.zeros(target_shape, dtype=volume.dtype)
+    
+    # Tính toán chỉ số để cắt hoặc chèn cho từng chiều
+    slices_src = []
+    slices_dst = []
+    
+    for c, t in zip(current_shape, target_shape):
+        if c >= t:
+            # Nếu ảnh lớn hơn target -> Cắt lấy tâm
+            start = (c - t) // 2
+            slices_src.append(slice(start, start + t))
+            slices_dst.append(slice(0, t))
+        else:
+            # Nếu ảnh nhỏ hơn target -> Chèn vào giữa (Padding)
+            start = (t - c) // 2
+            slices_src.append(slice(0, c))
+            slices_dst.append(slice(start, start + c))
+            
+    new_volume[tuple(slices_dst)] = volume[tuple(slices_src)]
+    return new_volume
