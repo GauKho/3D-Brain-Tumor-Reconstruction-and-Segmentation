@@ -4,3 +4,6 @@ nibabel
 matplotlib
 scipy
 scikit-learn
+tqdm 
+thop
+wandb
