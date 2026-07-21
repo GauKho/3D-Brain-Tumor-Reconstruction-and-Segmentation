@@ -1,0 +1,258 @@
+<!doctype html>
+<html lang="vi">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>TumorMesh LATUPNet Studio</title>
+  <link rel="preconnect" href="https://unpkg.com">
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <header class="app-header">
+    <div class="brand-block">
+      <div class="brand-mark" aria-hidden="true"><i data-lucide="scan-line"></i></div>
+      <div>
+        <h1>TumorMesh Studio</h1>
+        <p>LATUPNet + 3D Wavelet MRI segmentation</p>
+      </div>
+    </div>
+    <div class="system-status" aria-live="polite">
+      <span class="status-dot" id="statusDot"></span>
+      <span id="statusText">Đang kiểm tra hệ thống</span>
+    </div>
+  </header>
+
+  <main class="app-shell">
+    <aside class="input-panel">
+      <div class="section-heading">
+        <span class="step-number">1</span>
+        <div>
+          <h2>Nạp ảnh MRI</h2>
+          <p>Chọn đủ ba modality của cùng một bệnh nhân.</p>
+        </div>
+      </div>
+
+      <div class="modality-list">
+        <label class="file-row" for="t1ceInput">
+          <span class="modality-code">T1ce</span>
+          <span class="file-copy">
+            <strong id="t1ceName">Chọn file NIfTI</strong>
+            <small>.nii hoặc .nii.gz</small>
+          </span>
+          <i data-lucide="file-plus-2"></i>
+          <input id="t1ceInput" type="file" accept=".nii,.gz">
+        </label>
+        <label class="file-row" for="t2Input">
+          <span class="modality-code">T2</span>
+          <span class="file-copy">
+            <strong id="t2Name">Chọn file NIfTI</strong>
+            <small>.nii hoặc .nii.gz</small>
+          </span>
+          <i data-lucide="file-plus-2"></i>
+          <input id="t2Input" type="file" accept=".nii,.gz">
+        </label>
+        <label class="file-row" for="flairInput">
+          <span class="modality-code">FLAIR</span>
+          <span class="file-copy">
+            <strong id="flairName">Chọn file NIfTI</strong>
+            <small>.nii hoặc .nii.gz</small>
+          </span>
+          <i data-lucide="file-plus-2"></i>
+          <input id="flairInput" type="file" accept=".nii,.gz">
+        </label>
+      </div>
+
+      <button class="secondary-button full-width" id="sampleButton" type="button">
+        <i data-lucide="folder-open"></i>
+        Dùng ca mẫu trong dự án
+      </button>
+
+      <div class="upload-message" id="uploadMessage">
+        <i data-lucide="info"></i>
+        <span>Ảnh sẽ tự hiển thị khi đủ ba file.</span>
+      </div>
+
+      <div class="diagnosis-block">
+        <div class="section-heading compact">
+          <span class="step-number">2</span>
+          <div>
+            <h2>Chạy mô hình</h2>
+            <p>Phân đoạn tự động vùng u từ ba ảnh MRI đã nạp.</p>
+          </div>
+        </div>
+        <button class="primary-button full-width" id="diagnoseButton" type="button" disabled>
+          <i data-lucide="brain-circuit"></i>
+          Tiến hành chẩn đoán
+        </button>
+      </div>
+    </aside>
+
+    <div class="content-area">
+      <section class="preview-section" id="previewSection">
+        <div class="content-heading">
+          <div>
+            <span class="eyebrow">MRI INPUT</span>
+            <h2 id="caseTitle">Chưa có dữ liệu</h2>
+          </div>
+          <div class="volume-meta" id="volumeMeta">Chọn ba file NIfTI để bắt đầu</div>
+        </div>
+
+        <div class="empty-state" id="emptyState">
+          <div class="empty-visual">
+            <i data-lucide="images"></i>
+          </div>
+          <h3>Vùng xem ảnh MRI</h3>
+          <p>Ba lát cắt T1ce, T2 và FLAIR sẽ xuất hiện tại đây.</p>
+        </div>
+
+        <div class="preview-content hidden" id="previewContent">
+          <div class="slice-grid">
+            <figure class="slice-item">
+              <figcaption><span>T1ce</span><small>Tăng quang</small></figcaption>
+              <img id="t1cePreview" alt="Lát cắt MRI T1ce">
+            </figure>
+            <figure class="slice-item">
+              <figcaption><span>T2</span><small>Dịch và phù</small></figcaption>
+              <img id="t2Preview" alt="Lát cắt MRI T2">
+            </figure>
+            <figure class="slice-item">
+              <figcaption><span>FLAIR</span><small>Tổn thương nổi bật</small></figcaption>
+              <img id="flairPreview" alt="Lát cắt MRI FLAIR">
+            </figure>
+          </div>
+          <div class="slice-control">
+            <label for="sliceRange">Lát cắt axial</label>
+            <input id="sliceRange" type="range" min="0" max="154" value="77">
+            <output id="sliceOutput">77 / 154</output>
+          </div>
+        </div>
+      </section>
+
+      <section class="progress-section hidden" id="progressSection" aria-live="polite">
+        <div class="progress-copy">
+          <span class="pulse-ring"><i data-lucide="scan-search"></i></span>
+          <div>
+            <span class="eyebrow">LATUPNET INFERENCE</span>
+            <h2 id="progressTitle">Đang chuẩn hóa volume</h2>
+            <p id="progressText">Chuẩn bị tensor 9 × 128 × 128 × 128</p>
+          </div>
+        </div>
+        <div class="indeterminate-bar"><span></span></div>
+      </section>
+
+      <section class="results-section hidden" id="resultsSection">
+        <div class="content-heading results-heading">
+          <div>
+            <span class="eyebrow">SEGMENTATION OUTPUT</span>
+            <h2>Kết quả chẩn đoán hỗ trợ</h2>
+          </div>
+          <a class="secondary-button" id="downloadButton" href="#" download>
+            <i data-lucide="download"></i>
+            Tải mask NIfTI
+          </a>
+        </div>
+
+        <div class="metric-strip">
+          <div class="metric"><span>Thể tích vùng u</span><strong id="volumeMetric">0 ml</strong></div>
+          <div class="metric"><span>Độ tin cậy trung bình</span><strong id="confidenceMetric">0%</strong></div>
+          <div class="metric"><span>Tỷ lệ u / não</span><strong id="ratioMetric">0%</strong></div>
+          <div class="metric"><span>Thời gian inference</span><strong id="timeMetric">0 s</strong></div>
+        </div>
+
+        <div class="quality-banner" id="qualityBanner" role="status">
+          <i data-lucide="badge-check"></i>
+          <div>
+            <strong id="qualityTitle">Kiểm tra không gian hợp lệ</strong>
+            <p id="qualityMessage">Prediction nằm trong vùng não.</p>
+          </div>
+        </div>
+
+        <div class="result-detail-grid orthogonal-layout">
+          <div class="orthogonal-panel">
+            <div class="panel-heading">
+              <div>
+                <h3>FLAIR + segmentation theo ba mặt phẳng</h3>
+                <p>Mặc định là lát có diện tích vùng u lớn nhất trên từng trục</p>
+              </div>
+              <span class="result-tag">2D OVERLAY</span>
+            </div>
+            <div class="orthogonal-view-grid">
+              <figure class="result-slice">
+                <figcaption><strong>Axial</strong><span id="axialOutput">0 / 0</span></figcaption>
+                <img id="axialResult" alt="Overlay axial trên FLAIR">
+                <input id="axialRange" data-axis="axial" type="range" min="0" max="0" value="0" aria-label="Lát axial">
+              </figure>
+              <figure class="result-slice">
+                <figcaption><strong>Coronal</strong><span id="coronalOutput">0 / 0</span></figcaption>
+                <img id="coronalResult" alt="Overlay coronal trên FLAIR">
+                <input id="coronalRange" data-axis="coronal" type="range" min="0" max="0" value="0" aria-label="Lát coronal">
+              </figure>
+              <figure class="result-slice">
+                <figcaption><strong>Sagittal</strong><span id="sagittalOutput">0 / 0</span></figcaption>
+                <img id="sagittalResult" alt="Overlay sagittal trên FLAIR">
+                <input id="sagittalRange" data-axis="sagittal" type="range" min="0" max="0" value="0" aria-label="Lát sagittal">
+              </figure>
+            </div>
+          </div>
+          <div class="breakdown-panel">
+            <div class="panel-heading">
+              <div>
+                <h3>Phân bố thể tích</h3>
+                <p>Ước lượng từ voxel spacing gốc</p>
+              </div>
+            </div>
+            <div id="classBreakdown" class="class-breakdown"></div>
+            <div class="clinical-note">
+              <i data-lucide="shield-alert"></i>
+              <p>Kết quả chỉ phục vụ nghiên cứu, không thay thế kết luận của bác sĩ.</p>
+            </div>
+          </div>
+        </div>
+
+        <div class="viewer-layout">
+          <div class="viewer-stage" id="viewerStage">
+            <canvas id="segmentationCanvas" aria-label="Mô hình 3D não và vùng segmentation"></canvas>
+            <div class="viewer-badge">3D BRAIN + SEGMENTATION</div>
+            <div class="viewer-loading" id="viewerLoading">
+              <i data-lucide="loader-circle"></i>
+              <span>Đang dựng bề mặt não và vùng u</span>
+            </div>
+            <div class="viewer-help">Kéo để xoay · Cuộn để thu phóng</div>
+          </div>
+          <aside class="viewer-controls">
+            <div>
+              <h3>Lớp phân đoạn</h3>
+              <div class="class-toggles" id="classToggles"></div>
+            </div>
+            <div class="control-group">
+              <label for="opacityRange">Độ trong suốt <output id="opacityOutput">76%</output></label>
+              <input id="opacityRange" type="range" min="20" max="100" value="76">
+            </div>
+            <label class="switch-row">
+              <span>Tự động xoay</span>
+              <input id="rotateToggle" type="checkbox" checked>
+              <span class="switch"></span>
+            </label>
+            <label class="switch-row">
+              <span>Hiện wireframe</span>
+              <input id="wireframeToggle" type="checkbox">
+              <span class="switch"></span>
+            </label>
+            <button class="icon-text-button" id="resetViewButton" type="button">
+              <i data-lucide="focus"></i>
+              Đặt lại góc nhìn
+            </button>
+          </aside>
+        </div>
+      </section>
+    </div>
+  </main>
+
+  <div class="toast" id="toast" role="status" aria-live="polite"></div>
+  <script type="importmap">
+    {"imports":{"three":"/vendor/three.module.js"}}
+  </script>
+  <script src="https://unpkg.com/lucide@0.468.0/dist/umd/lucide.min.js"></script>
+  <script type="module" src="/app.js"></script>
+</body>
+</html>

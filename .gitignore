@@ -216,3 +216,29 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Local inference UI runtime
+runtime/
+.vendor/
+
+# Medical data and generated predictions must not be committed
+*.nii
+*.nii.gz
+preprocess_cache*/
+sample_predictions/
+wandb/
+
+# Model artifacts: publish only the reviewed deployment checkpoint
+*.pth
+*.pt
+*.ckpt
+outputs/*
+!outputs/best_latupnet_wavelet_region3_sigmoid_priority1.pth
+
+# Local reports, render output and browser test artifacts
+tmp/
+output/
+paper/
+Project paper/
+playwright-report/
+test-results/
