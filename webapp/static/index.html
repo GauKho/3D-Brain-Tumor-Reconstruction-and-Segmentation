@@ -76,8 +76,30 @@
         <div class="section-heading compact">
           <span class="step-number">2</span>
           <div>
-            <h2>Chạy mô hình</h2>
-            <p>Phân đoạn tự động vùng u từ ba ảnh MRI đã nạp.</p>
+            <h2>Chọn mô hình và chạy</h2>
+            <p>Model được chọn sẽ xử lý bộ MRI hiện tại.</p>
+          </div>
+        </div>
+        <div class="model-field">
+          <label id="modelPickerLabel">Mô hình phân đoạn</label>
+          <div class="model-picker">
+            <button
+              class="model-picker-button"
+              id="modelPickerButton"
+              type="button"
+              disabled
+              aria-haspopup="listbox"
+              aria-expanded="false"
+              aria-labelledby="modelPickerLabel selectedModelName"
+            >
+              <span class="model-picker-icon" aria-hidden="true"><i data-lucide="brain-circuit"></i></span>
+              <span class="model-picker-copy">
+                <strong id="selectedModelName">Đang tải danh sách model</strong>
+                <small id="selectedModelDescription">Vui lòng chờ backend phản hồi</small>
+              </span>
+              <i class="model-picker-chevron" data-lucide="chevrons-up-down" aria-hidden="true"></i>
+            </button>
+            <div class="model-menu hidden" id="modelMenu" role="listbox" aria-labelledby="modelPickerLabel"></div>
           </div>
         </div>
         <button class="primary-button full-width" id="diagnoseButton" type="button" disabled>
@@ -132,7 +154,7 @@
         <div class="progress-copy">
           <span class="pulse-ring"><i data-lucide="scan-search"></i></span>
           <div>
-            <span class="eyebrow">LATUPNET INFERENCE</span>
+            <span class="eyebrow" id="progressEyebrow">MODEL INFERENCE</span>
             <h2 id="progressTitle">Đang chuẩn hóa volume</h2>
             <p id="progressText">Chuẩn bị tensor 9 × 128 × 128 × 128</p>
           </div>
@@ -145,6 +167,10 @@
           <div>
             <span class="eyebrow">SEGMENTATION OUTPUT</span>
             <h2>Kết quả chẩn đoán hỗ trợ</h2>
+            <div class="result-model">
+              <i data-lucide="brain-circuit" aria-hidden="true"></i>
+              <span>Đã xử lý bằng <strong id="resultModelName">Model</strong></span>
+            </div>
           </div>
           <a class="secondary-button" id="downloadButton" href="#" download>
             <i data-lucide="download"></i>

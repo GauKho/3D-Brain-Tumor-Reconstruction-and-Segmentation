@@ -1,15 +1,30 @@
 import base64
 import io
 import json
+import re
 import tempfile
 import unittest
+from html.parser import HTMLParser
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 import nibabel as nib
 import numpy as np
 import torch
+from fastapi import HTTPException
 from PIL import Image
 
+from webapp.app import (
+    DEFAULT_MODEL_ID,
+    MODEL_SPECS,
+    cases,
+    cases_lock,
+    diagnose,
+    model_services,
+    register_case,
+    status,
+)
 from webapp.inference import (
     ModelService,
     apply_crop_pad,
@@ -26,7 +41,19 @@ from webapp.inference import (
 ROOT = Path(__file__).resolve().parents[1]
 SAMPLE_DIR = ROOT / "BraTS20_Validation_031_t1ce.nii"
 CHECKPOINT = ROOT / "outputs" / "best_latupnet_wavelet_region3_sigmoid_priority1.pth"
+REL_CHECKPOINT = ROOT / "REL" / "working" / "working" / "best_model_rl_rel_ppo.pth"
 TRAINING_NOTEBOOK = ROOT / "latupnet-wavelet-preprocessing-for-brats.ipynb"
+
+
+class IdCollector(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.ids = []
+
+    def handle_starttag(self, _tag, attrs):
+        attributes = dict(attrs)
+        if "id" in attributes:
+            self.ids.append(attributes["id"])
 
 
 class SpatialTransformTests(unittest.TestCase):
@@ -113,20 +140,109 @@ class SpatialTransformTests(unittest.TestCase):
         self.assertEqual(set(np.unique(labels).tolist()), {0, 1, 2, 4})
 
 
-@unittest.skipUnless(CHECKPOINT.exists(), "Missing Wavelet LATUPNet checkpoint")
+@unittest.skipUnless(
+    CHECKPOINT.exists() and REL_CHECKPOINT.exists(),
+    "Missing one or more Studio checkpoints",
+)
 class CheckpointContractTests(unittest.TestCase):
-    def test_checkpoint_loads_exact_nine_channel_three_region_model(self):
-        service = ModelService(CHECKPOINT)
-        model = service.load()
+    def test_both_checkpoints_load_exact_nine_channel_three_region_model(self):
+        checkpoints = (
+            ("latup-net-wavelet", "Latup-net-wavelet", CHECKPOINT),
+            ("rel-ppo", "Rel_ppo", REL_CHECKPOINT),
+        )
+        for model_id, model_name, checkpoint in checkpoints:
+            with self.subTest(model_id=model_id):
+                service = ModelService(checkpoint, model_id=model_id, model_name=model_name)
+                model = service.load()
 
-        self.assertEqual(model.pc_block.shared_conv.in_channels, 9)
-        self.assertEqual(model.final_conv.out_channels, 3)
-        self.assertEqual(sum(parameter.numel() for parameter in model.parameters()), 2_993_539)
+                self.assertEqual(service.model_id, model_id)
+                self.assertEqual(service.model_name, model_name)
+                self.assertEqual(model.pc_block.shared_conv.in_channels, 9)
+                self.assertEqual(model.final_conv.out_channels, 3)
+                self.assertEqual(
+                    sum(parameter.numel() for parameter in model.parameters()),
+                    2_993_539,
+                )
+                self.assertEqual(service.region_thresholds, (0.5, 0.5, 0.5))
+
+    def test_fixed_checkpoint_exposes_training_contract(self):
+        service = ModelService(CHECKPOINT)
+        service.load()
         self.assertEqual(
             service.checkpoint_config.get("output_representation"),
             "WT_TC_ET_regions",
         )
+
+    def test_rl_checkpoint_uses_verified_runtime_defaults_without_config(self):
+        service = ModelService(REL_CHECKPOINT)
+        service.load()
+        self.assertEqual(service.checkpoint_config, {})
         self.assertEqual(service.region_thresholds, (0.5, 0.5, 0.5))
+
+
+class ModelRegistryTests(unittest.TestCase):
+    def tearDown(self):
+        with cases_lock:
+            cases.pop("model-routing", None)
+
+    def test_status_lists_both_selectable_models(self):
+        payload = status()
+        models = {model["id"]: model for model in payload["models"]}
+
+        self.assertEqual(DEFAULT_MODEL_ID, "latup-net-wavelet")
+        self.assertEqual(list(MODEL_SPECS), ["latup-net-wavelet", "rel-ppo"])
+        self.assertEqual(models["latup-net-wavelet"]["name"], "Latup-net-wavelet")
+        self.assertEqual(models["rel-ppo"]["name"], "Rel_ppo")
+        self.assertTrue(models["latup-net-wavelet"]["ready"])
+        self.assertTrue(models["rel-ppo"]["ready"])
+
+    def test_diagnose_routes_case_to_requested_model(self):
+        case = SimpleNamespace(case_id="model-routing")
+        register_case(case)
+        expected = {"model_id": "rel-ppo", "model_name": "Rel_ppo"}
+
+        with patch.object(model_services["rel-ppo"], "diagnose", return_value=expected) as mocked:
+            result = diagnose(case.case_id, model_id="rel-ppo")
+
+        self.assertEqual(result, expected)
+        mocked.assert_called_once_with(case)
+
+    def test_diagnose_rejects_unknown_model(self):
+        case = SimpleNamespace(case_id="model-routing")
+        register_case(case)
+
+        with self.assertRaises(HTTPException) as captured:
+            diagnose(case.case_id, model_id="unknown")
+
+        self.assertEqual(captured.exception.status_code, 400)
+
+
+class FrontendContractTests(unittest.TestCase):
+    def test_model_picker_ids_and_api_query_are_wired(self):
+        html = (ROOT / "webapp" / "static" / "index.html").read_text(encoding="utf-8")
+        javascript = (ROOT / "webapp" / "static" / "app.js").read_text(encoding="utf-8")
+        collector = IdCollector()
+        collector.feed(html)
+        html_ids = set(collector.ids)
+        static_js_ids = set(re.findall(r'\$\("([^"]+)"\)', javascript))
+
+        self.assertEqual(len(collector.ids), len(html_ids), "HTML contains duplicate IDs")
+        self.assertFalse(static_js_ids - html_ids, "JavaScript references missing HTML IDs")
+        self.assertIn("modelPickerButton", html_ids)
+        self.assertIn("modelMenu", html_ids)
+        self.assertIn("resultModelName", html_ids)
+        self.assertIn("diagnose?model_id=", javascript)
+
+    def test_viewer_releases_meshes_before_inference_and_recovers_context(self):
+        javascript = (ROOT / "webapp" / "static" / "app.js").read_text(encoding="utf-8")
+        three_module = (
+            ROOT / "webapp" / "static" / "vendor" / "three.module.js"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("state.viewer?.suspend", javascript)
+        self.assertIn("replaceViewerCanvas", javascript)
+        self.assertIn("preserveDrawingBuffer: false", javascript)
+        self.assertIn("format !== null && format.precision > 0", three_module)
 
 
 @unittest.skipUnless(TRAINING_NOTEBOOK.exists(), "Missing current training notebook")
@@ -167,13 +283,19 @@ class CheckpointRegressionTests(unittest.TestCase):
         cls.case = load_case("regression", "BraTS20_Validation_031", paths)
         cls.temp_dir = tempfile.TemporaryDirectory()
         cls.case.paths["t1ce"] = Path(cls.temp_dir.name) / paths["t1ce"].name
-        cls.result = ModelService(CHECKPOINT).diagnose(cls.case)
+        cls.result = ModelService(
+            CHECKPOINT,
+            model_id="latup-net-wavelet",
+            model_name="Latup-net-wavelet",
+        ).diagnose(cls.case)
 
     @classmethod
     def tearDownClass(cls):
         cls.temp_dir.cleanup()
 
     def test_model_prediction_is_nonempty_and_inside_brain(self):
+        self.assertEqual(self.result["model_id"], "latup-net-wavelet")
+        self.assertEqual(self.result["model_name"], "Latup-net-wavelet")
         self.assertGreater(self.result["tumor_voxels"], 0)
         self.assertGreater(self.result["tumor_volume_ml"], 0)
         self.assertEqual(self.result["outside_brain_voxels"], 0)

@@ -234,6 +234,7 @@ wandb/
 *.ckpt
 outputs/*
 !outputs/best_latupnet_wavelet_region3_sigmoid_priority1.pth
+!REL/working/working/best_model_rl_rel_ppo.pth
 
 # Local reports, render output and browser test artifacts
 tmp/

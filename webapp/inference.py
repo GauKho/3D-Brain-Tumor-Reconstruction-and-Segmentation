@@ -1,6 +1,7 @@
 import base64
 import io
 import os
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -75,6 +76,8 @@ class CaseData:
     transform: SpatialTransform | None = None
     inference_result: dict | None = None
     mesh_result: dict | None = None
+    model_id: str | None = None
+    model_name: str | None = None
 
     @property
     def shape(self):
@@ -86,12 +89,20 @@ class CaseData:
 
 
 class ModelService:
-    def __init__(self, checkpoint_path: Path):
+    def __init__(
+        self,
+        checkpoint_path: Path,
+        model_id: str | None = None,
+        model_name: str | None = None,
+    ):
         self.checkpoint_path = checkpoint_path
+        self.model_id = model_id or checkpoint_path.stem
+        self.model_name = model_name or self.model_id
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.model = None
         self.checkpoint_config = {}
         self.region_thresholds = (0.5, 0.5, 0.5)
+        self._lock = threading.RLock()
         if self.device.type == "cuda":
             torch.backends.cudnn.benchmark = False
             torch.backends.cudnn.deterministic = True
@@ -102,108 +113,118 @@ class ModelService:
         return self.model is not None
 
     def load(self):
-        if self.model is not None:
-            return self.model
-        if not self.checkpoint_path.exists():
-            raise FileNotFoundError(f"Khong tim thay checkpoint: {self.checkpoint_path}")
+        with self._lock:
+            if self.model is not None:
+                return self.model
+            if not self.checkpoint_path.exists():
+                raise FileNotFoundError(f"Khong tim thay checkpoint: {self.checkpoint_path}")
 
-        checkpoint = torch.load(
-            self.checkpoint_path,
-            map_location=self.device,
-            weights_only=False,
-        )
-        if not isinstance(checkpoint, dict):
-            raise ValueError("Checkpoint khong chua state_dict hop le.")
+            checkpoint = torch.load(
+                self.checkpoint_path,
+                map_location=self.device,
+                weights_only=False,
+            )
+            if not isinstance(checkpoint, dict):
+                raise ValueError("Checkpoint khong chua state_dict hop le.")
 
-        if "model_state_dict" in checkpoint:
-            state = checkpoint["model_state_dict"]
-        elif "state_dict" in checkpoint:
-            state = checkpoint["state_dict"]
-        else:
-            state = checkpoint
-        if not isinstance(state, dict):
-            raise ValueError("Checkpoint khong chua model_state_dict hop le.")
+            if "model_state_dict" in checkpoint:
+                state = checkpoint["model_state_dict"]
+            elif "state_dict" in checkpoint:
+                state = checkpoint["state_dict"]
+            else:
+                state = checkpoint
+            if not isinstance(state, dict):
+                raise ValueError("Checkpoint khong chua model_state_dict hop le.")
 
-        config = checkpoint.get("config", {})
-        if config and not isinstance(config, dict):
-            raise ValueError("Config trong checkpoint khong hop le.")
-        validate_checkpoint_contract(config)
+            config = checkpoint.get("config", {})
+            if config and not isinstance(config, dict):
+                raise ValueError("Config trong checkpoint khong hop le.")
+            validate_checkpoint_contract(config)
 
-        normalized_state = {
-            key.removeprefix("module."): value
-            for key, value in state.items()
-        }
-        validate_state_dict_contract(normalized_state)
-        model = LATUPNet(
-            in_channels=MODEL_INPUT_CHANNELS,
-            num_classes=MODEL_OUTPUT_REGIONS,
-            use_se=True,
-            dropout_rate=0.2,
-        )
-        model.load_state_dict(normalized_state, strict=True)
-        model.to(self.device).eval()
-        self.checkpoint_config = config
-        self.region_thresholds = (
-            float(config.get("wt_threshold", 0.5)),
-            float(config.get("tc_threshold", 0.5)),
-            float(config.get("et_threshold", 0.5)),
-        )
-        self.model = model
-        return model
+            normalized_state = {
+                key.removeprefix("module."): value
+                for key, value in state.items()
+            }
+            validate_state_dict_contract(normalized_state)
+            model = LATUPNet(
+                in_channels=MODEL_INPUT_CHANNELS,
+                num_classes=MODEL_OUTPUT_REGIONS,
+                use_se=True,
+                dropout_rate=0.2,
+            )
+            model.load_state_dict(normalized_state, strict=True)
+            model.to(self.device).eval()
+            self.checkpoint_config = config
+            self.region_thresholds = (
+                float(config.get("wt_threshold", 0.5)),
+                float(config.get("tc_threshold", 0.5)),
+                float(config.get("et_threshold", 0.5)),
+            )
+            self.model = model
+            return model
 
     def diagnose(self, case: CaseData):
-        started = time.perf_counter()
-        model = self.load()
-        prepared = preprocess(case.volumes, case.spacing)
-        tensor = torch.from_numpy(prepared.tensor).unsqueeze(0).to(self.device)
+        with self._lock:
+            started = time.perf_counter()
+            model = self.load()
+            prepared = preprocess(case.volumes, case.spacing)
+            tensor = torch.from_numpy(prepared.tensor).unsqueeze(0).to(self.device)
 
-        if self.device.type == "cuda":
-            torch.cuda.synchronize()
-        with torch.inference_mode():
-            logits = model(tensor)
-            probabilities = torch.sigmoid(logits)
-            prediction = region_probabilities_to_brats_labels(
-                probabilities,
-                thresholds=self.region_thresholds,
-            ).squeeze(0)
-        if self.device.type == "cuda":
-            torch.cuda.synchronize()
+            if self.device.type == "cuda":
+                torch.cuda.synchronize()
+            with torch.inference_mode():
+                logits = model(tensor)
+                probabilities = torch.sigmoid(logits)
+                prediction = region_probabilities_to_brats_labels(
+                    probabilities,
+                    thresholds=self.region_thresholds,
+                ).squeeze(0)
+            if self.device.type == "cuda":
+                torch.cuda.synchronize()
 
-        prediction_model = prediction.cpu().numpy().astype(np.uint8)
-        prediction_model[~prepared.brain_mask] = 0
-        prediction_native = inverse_crop_pad_resample(
-            prediction_model,
-            prepared.transform,
-            order=0,
-        ).astype(np.uint8, copy=False)
+            prediction_model = prediction.cpu().numpy().astype(np.uint8)
+            prediction_model[~prepared.brain_mask] = 0
+            prediction_native = inverse_crop_pad_resample(
+                prediction_model,
+                prepared.transform,
+                order=0,
+            ).astype(np.uint8, copy=False)
 
-        brain_mask_native = build_brain_mask(case.volumes)
-        prediction_native[~brain_mask_native] = 0
+            brain_mask_native = build_brain_mask(case.volumes)
+            prediction_native[~brain_mask_native] = 0
 
-        case.transform = prepared.transform
-        case.brain_mask_model_space = prepared.brain_mask
-        case.brain_mask = brain_mask_native
-        case.prediction_model_space = prediction_model
-        case.prediction = prediction_native
-        case.mesh_result = None
-        case.prediction_path = (
-            case.paths["t1ce"].parent
-            / "prediction_latupnet_wavelet.nii.gz"
-        )
+            case.transform = prepared.transform
+            case.brain_mask_model_space = prepared.brain_mask
+            case.brain_mask = brain_mask_native
+            case.prediction_model_space = prediction_model
+            case.prediction = prediction_native
+            case.mesh_result = None
+            case.model_id = self.model_id
+            case.model_name = self.model_name
+            case.prediction_path = (
+                case.paths["t1ce"].parent
+                / f"prediction_{self.model_id}.nii.gz"
+            )
 
-        reference = case.images["t1ce"]
-        output_header = reference.header.copy()
-        output_header.set_data_dtype(np.uint8)
-        nib.save(
-            nib.Nifti1Image(prediction_native, reference.affine, output_header),
-            str(case.prediction_path),
-        )
+            reference = case.images["t1ce"]
+            output_header = reference.header.copy()
+            output_header.set_data_dtype(np.uint8)
+            nib.save(
+                nib.Nifti1Image(prediction_native, reference.affine, output_header),
+                str(case.prediction_path),
+            )
 
-        probabilities_np = probabilities.squeeze(0).cpu().numpy()
-        elapsed = time.perf_counter() - started
-        result = build_result(case, probabilities_np, elapsed)
-        case.inference_result = result
-        return result
+            probabilities_np = probabilities.squeeze(0).cpu().numpy()
+            elapsed = time.perf_counter() - started
+            result = build_result(
+                case,
+                probabilities_np,
+                elapsed,
+                model_id=self.model_id,
+                model_name=self.model_name,
+            )
+            case.inference_result = result
+            return result
 
 
 def validate_checkpoint_contract(config):
@@ -505,7 +526,7 @@ def build_preview(case: CaseData, index=None):
     }
 
 
-def build_result(case, probabilities, elapsed):
+def build_result(case, probabilities, elapsed, model_id=None, model_name=None):
     prediction = case.prediction
     voxel_volume_ml = float(np.prod(case.spacing)) / 1000.0
     class_stats = []
@@ -541,6 +562,8 @@ def build_result(case, probabilities, elapsed):
     return {
         "case_id": case.case_id,
         "case_name": case.case_name,
+        "model_id": model_id or case.model_id,
+        "model_name": model_name or case.model_name,
         "inference_seconds": round(elapsed, 2),
         "mean_confidence": round(mean_confidence * 100, 1),
         "confidence_basis": "mean WT sigmoid probability over predicted tumor voxels",
@@ -662,7 +685,12 @@ def build_meshes(case: CaseData):
                 step_size=1,
             )
         )
-    case.mesh_result = {"case_id": case.case_id, "meshes": meshes}
+    case.mesh_result = {
+        "case_id": case.case_id,
+        "model_id": case.model_id,
+        "model_name": case.model_name,
+        "meshes": meshes,
+    }
     return case.mesh_result
 
 

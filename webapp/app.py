@@ -20,20 +20,51 @@ from webapp.inference import (
 ROOT = Path(__file__).resolve().parents[1]
 STATIC_DIR = ROOT / "webapp" / "static"
 RUNTIME_DIR = ROOT / "runtime" / "cases"
-CHECKPOINT = (
-    ROOT
-    / "outputs"
-    / "best_latupnet_wavelet_region3_sigmoid_priority1.pth"
+MODEL_SPECS = OrderedDict(
+    [
+        (
+            "latup-net-wavelet",
+            {
+                "name": "Latup-net-wavelet",
+                "description": "LATUPNet 9 kênh với wavelet và trọng số loss cố định.",
+                "checkpoint": ROOT
+                / "outputs"
+                / "best_latupnet_wavelet_region3_sigmoid_priority1.pth",
+            },
+        ),
+        (
+            "rel-ppo",
+            {
+                "name": "Rel_ppo",
+                "description": "LATUPNet 9 kênh được huấn luyện cùng bộ điều khiển PPO.",
+                "checkpoint": ROOT
+                / "REL"
+                / "working"
+                / "working"
+                / "best_model_rl_rel_ppo.pth",
+            },
+        ),
+    ]
 )
+DEFAULT_MODEL_ID = "latup-net-wavelet"
+CHECKPOINT = MODEL_SPECS[DEFAULT_MODEL_ID]["checkpoint"]
 SAMPLE_DIR = ROOT / "BraTS20_Validation_031_t1ce.nii"
 MODALITIES = ("t1ce", "t2", "flair")
 MAX_UPLOAD_BYTES = 160 * 1024 * 1024
 
 RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
-app = FastAPI(title="TumorMesh LATUPNet Studio")
-model_service = ModelService(CHECKPOINT)
+app = FastAPI(title="TumorMesh Multi-Model Studio")
+model_services = {
+    model_id: ModelService(
+        spec["checkpoint"],
+        model_id=model_id,
+        model_name=spec["name"],
+    )
+    for model_id, spec in MODEL_SPECS.items()
+}
 cases = OrderedDict()
 cases_lock = threading.Lock()
+inference_lock = threading.Lock()
 
 
 def register_case(case):
@@ -75,9 +106,22 @@ async def save_upload(upload, destination):
 @app.get("/api/status")
 def status():
     sample_files = [next(SAMPLE_DIR.glob(f"*_{modality}.nii*"), None) for modality in MODALITIES] if SAMPLE_DIR.is_dir() else []
+    models = [
+        {
+            "id": model_id,
+            "name": spec["name"],
+            "description": spec["description"],
+            "ready": spec["checkpoint"].exists(),
+            "loaded": model_services[model_id].loaded,
+        }
+        for model_id, spec in MODEL_SPECS.items()
+    ]
     return {
-        "checkpoint_ready": CHECKPOINT.exists(),
-        "model_loaded": model_service.loaded,
+        "checkpoint_ready": any(model["ready"] for model in models),
+        "all_models_ready": all(model["ready"] for model in models),
+        "model_loaded": any(model["loaded"] for model in models),
+        "default_model_id": DEFAULT_MODEL_ID,
+        "models": models,
         "sample_available": len(sample_files) == 3 and all(sample_files),
     }
 
@@ -137,10 +181,23 @@ def case_slice(case_id: str, index: int):
 
 
 @app.post("/api/cases/{case_id}/diagnose")
-def diagnose(case_id: str):
+def diagnose(case_id: str, model_id: str = DEFAULT_MODEL_ID):
     case = get_case(case_id)
+    if model_id not in MODEL_SPECS:
+        available = ", ".join(MODEL_SPECS)
+        raise HTTPException(
+            status_code=400,
+            detail=f"Model không hợp lệ. Các lựa chọn: {available}.",
+        )
+    spec = MODEL_SPECS[model_id]
+    if not spec["checkpoint"].exists():
+        raise HTTPException(
+            status_code=503,
+            detail=f"Model {spec['name']} chưa có checkpoint trên máy.",
+        )
     try:
-        return model_service.diagnose(case)
+        with inference_lock:
+            return model_services[model_id].diagnose(case)
     except RuntimeError as error:
         if "out of memory" in str(error).lower():
             raise HTTPException(status_code=507, detail="GPU không đủ bộ nhớ để chạy volume 128³.") from error
@@ -175,7 +232,7 @@ def download_prediction(case_id: str):
     return FileResponse(
         case.prediction_path,
         media_type="application/gzip",
-        filename=f"pred_{case.case_name}.nii.gz",
+        filename=f"pred_{case.case_name}_{case.model_id or 'segmentation'}.nii.gz",
     )
 
 

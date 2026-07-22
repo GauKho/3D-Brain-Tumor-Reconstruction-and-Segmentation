@@ -4,6 +4,9 @@ const state = {
   preview: null,
   result: null,
   viewer: null,
+  models: [],
+  selectedModelId: null,
+  isDiagnosing: false,
   sliceTimer: null,
   resultSliceTimers: {},
   resultSliceRequests: {},
@@ -17,6 +20,8 @@ const els = {
   volumeMeta: $("volumeMeta"), sliceRange: $("sliceRange"), sliceOutput: $("sliceOutput"),
   progressSection: $("progressSection"), resultsSection: $("resultsSection"),
   progressTitle: $("progressTitle"), progressText: $("progressText"), toast: $("toast"),
+  modelPickerButton: $("modelPickerButton"), modelMenu: $("modelMenu"),
+  selectedModelName: $("selectedModelName"), selectedModelDescription: $("selectedModelDescription"),
 };
 
 function refreshIcons() {
@@ -45,11 +50,81 @@ function setUploadMessage(message, mode = "") {
   els.uploadMessage.querySelector("span").textContent = message;
 }
 
+function getSelectedModel() {
+  return state.models.find(model => model.id === state.selectedModelId) || null;
+}
+
+function refreshDiagnoseAvailability() {
+  const model = getSelectedModel();
+  els.diagnoseButton.disabled = state.isDiagnosing || !state.caseId || !model?.ready;
+  els.modelPickerButton.disabled = state.isDiagnosing || !state.models.some(item => item.ready);
+}
+
+function setModelMenuOpen(open) {
+  const shouldOpen = Boolean(open) && !els.modelPickerButton.disabled;
+  els.modelMenu.classList.toggle("hidden", !shouldOpen);
+  els.modelPickerButton.setAttribute("aria-expanded", String(shouldOpen));
+}
+
+function renderModelOptions() {
+  els.modelMenu.innerHTML = state.models.map(model => {
+    const selected = model.id === state.selectedModelId;
+    const detail = model.ready ? model.description : "Không tìm thấy model trên máy";
+    return `
+      <button
+        class="model-option${selected ? " selected" : ""}"
+        type="button"
+        role="option"
+        aria-selected="${selected}"
+        data-model-id="${model.id}"
+        ${model.ready ? "" : "disabled"}
+      >
+        <span class="model-option-icon" aria-hidden="true"><i data-lucide="network"></i></span>
+        <span class="model-option-copy"><strong>${model.name}</strong><small>${detail}</small></span>
+        <i class="model-option-check" data-lucide="check" aria-hidden="true"></i>
+      </button>
+    `;
+  }).join("");
+
+  els.modelMenu.querySelectorAll(".model-option:not(:disabled)").forEach(option => {
+    option.addEventListener("click", () => selectModel(option.dataset.modelId, true));
+  });
+  refreshIcons();
+}
+
+function selectModel(modelId, announce = false) {
+  const model = state.models.find(item => item.id === modelId && item.ready);
+  if (!model) return;
+  state.selectedModelId = model.id;
+  els.selectedModelName.textContent = model.name;
+  els.selectedModelDescription.textContent = model.description;
+  renderModelOptions();
+  setModelMenuOpen(false);
+  refreshDiagnoseAvailability();
+  if (announce) showToast(`Đã chọn ${model.name}.`);
+}
+
 async function loadStatus() {
   try {
     const status = await request("/api/status");
-    els.statusDot.className = `status-dot ${status.checkpoint_ready ? "ready" : "error"}`;
-    els.statusText.textContent = status.checkpoint_ready ? "Studio sẵn sàng" : "Thiếu mô hình";
+    state.models = status.models || [];
+    const readyModels = state.models.filter(model => model.ready);
+    const preferredId = readyModels.some(model => model.id === state.selectedModelId)
+      ? state.selectedModelId
+      : (readyModels.find(model => model.id === status.default_model_id)?.id || readyModels[0]?.id);
+    if (preferredId) {
+      selectModel(preferredId);
+    } else {
+      state.selectedModelId = null;
+      els.selectedModelName.textContent = "Không có model khả dụng";
+      els.selectedModelDescription.textContent = "Kiểm tra lại các tệp model của dự án";
+      renderModelOptions();
+      refreshDiagnoseAvailability();
+    }
+    els.statusDot.className = `status-dot ${readyModels.length ? "ready" : "error"}`;
+    els.statusText.textContent = readyModels.length
+      ? `${readyModels.length}/${state.models.length} mô hình sẵn sàng`
+      : "Thiếu mô hình";
     els.sampleButton.disabled = !status.sample_available;
   } catch (error) {
     els.statusDot.className = "status-dot error";
@@ -103,7 +178,7 @@ function applyPreview(preview) {
   state.caseId = preview.case_id;
   state.preview = preview;
   state.result = null;
-  if (state.viewer?.dispose) state.viewer.dispose();
+  if (state.viewer?.suspend) state.viewer.suspend();
   els.caseTitle.textContent = preview.case_name;
   els.volumeMeta.textContent = `${preview.shape.join(" × ")} voxel · spacing ${preview.spacing.join(" × ")} mm`;
   els.emptyState.classList.add("hidden");
@@ -115,7 +190,7 @@ function applyPreview(preview) {
   els.sliceRange.max = preview.slice_max;
   els.sliceRange.value = preview.slice_index;
   els.sliceOutput.textContent = `${preview.slice_index} / ${preview.slice_max}`;
-  els.diagnoseButton.disabled = false;
+  refreshDiagnoseAvailability();
 }
 
 async function updateSlice(index) {
@@ -130,15 +205,14 @@ async function updateSlice(index) {
   }
 }
 
-const progressSteps = [
-  ["Đang chuẩn hóa volume", "Resample 1 mm, center crop/pad, clip P1–P99 và masked Min-Max"],
-  ["Đang tạo đặc trưng wavelet", "Symlet-8 level 2 tạo sáu energy map từ ba nguồn MRI"],
-  ["LATUPNet đang phân tích", "Tensor 9 kênh được suy luận thành ba vùng WT, TC và ET"],
-  ["Đang khôi phục mask", "Đảo crop/pad, resample nearest-neighbor về NIfTI gốc"],
-  ["Đang kiểm tra kết quả", "Ép ET ⊆ TC ⊆ WT, khóa brain mask và tạo output 2D/3D"],
-];
-
-function startProgress() {
+function startProgress(modelName) {
+  const progressSteps = [
+    ["Đang chuẩn hóa volume", "Resample 1 mm, center crop/pad, clip P1–P99 và masked Min-Max"],
+    ["Đang tạo đặc trưng wavelet", "Symlet-8 level 2 tạo sáu energy map từ ba nguồn MRI"],
+    [`${modelName} đang phân tích`, "Tensor 9 kênh được suy luận thành ba vùng WT, TC và ET"],
+    ["Đang khôi phục mask", "Đảo crop/pad, resample nearest-neighbor về NIfTI gốc"],
+    ["Đang kiểm tra kết quả", "Ép ET ⊆ TC ⊆ WT, khóa brain mask và tạo output 2D/3D"],
+  ];
   let index = 0;
   const update = () => {
     els.progressTitle.textContent = progressSteps[index][0];
@@ -151,22 +225,32 @@ function startProgress() {
 
 async function diagnose() {
   if (!state.caseId) return;
-  els.diagnoseButton.disabled = true;
+  const selectedModel = getSelectedModel();
+  if (!selectedModel?.ready) {
+    showToast("Hãy chọn một model khả dụng trước khi chẩn đoán.", true);
+    return;
+  }
+  state.isDiagnosing = true;
+  refreshDiagnoseAvailability();
+  setModelMenuOpen(false);
+  if (state.viewer?.suspend) state.viewer.suspend();
   els.progressSection.classList.remove("hidden");
   els.resultsSection.classList.add("hidden");
   els.progressSection.scrollIntoView({ behavior: "smooth", block: "center" });
-  const progressTimer = startProgress();
+  const progressTimer = startProgress(selectedModel.name);
   try {
-    const result = await request(`/api/cases/${state.caseId}/diagnose`, { method: "POST" });
+    const modelId = encodeURIComponent(selectedModel.id);
+    const result = await request(`/api/cases/${state.caseId}/diagnose?model_id=${modelId}`, { method: "POST" });
     state.result = result;
     renderResult(result);
-    showToast("LATUPNet đã hoàn tất phân đoạn và kiểm tra brain mask.");
+    showToast(`${result.model_name} đã hoàn tất phân đoạn và kiểm tra brain mask.`);
   } catch (error) {
     showToast(error.message, true);
   } finally {
     clearInterval(progressTimer);
     els.progressSection.classList.add("hidden");
-    els.diagnoseButton.disabled = false;
+    state.isDiagnosing = false;
+    refreshDiagnoseAvailability();
   }
 }
 
@@ -190,6 +274,7 @@ async function updateResultSlice(axis, index) {
 }
 
 function renderResult(result) {
+  $("resultModelName").textContent = result.model_name;
   $("volumeMetric").textContent = `${result.tumor_volume_ml.toFixed(3)} ml`;
   $("confidenceMetric").textContent = `${result.mean_confidence.toFixed(1)}%`;
   $("ratioMetric").textContent = `${(result.tumor_to_brain_ratio * 100).toFixed(2)}%`;
@@ -251,39 +336,108 @@ function showViewerError(error) {
 }
 
 async function initViewer(meshes) {
-  if (state.viewer?.dispose) state.viewer.dispose();
   const stage = $("viewerStage");
-  const canvas = $("segmentationCanvas");
   stage.querySelector(".viewer-error")?.remove();
+
   try {
-    const THREE = await import("/vendor/three.module.js");
-    const { OrbitControls } = await import("/vendor/OrbitControls.js");
-    const renderer = new THREE.WebGLRenderer({
-      canvas,
-      antialias: true,
-      alpha: false,
-      preserveDrawingBuffer: true,
+    if (state.viewer?.isContextLost()) {
+      state.viewer.dispose();
+      state.viewer = null;
+      replaceViewerCanvas();
+    }
+    if (!state.viewer) state.viewer = await createViewerSession(stage, $("segmentationCanvas"));
+    state.viewer.setMeshes(meshes);
+    state.viewer.resume();
+    $("viewerLoading").classList.add("hidden");
+  } catch (error) {
+    if (state.viewer?.dispose) state.viewer.dispose();
+    state.viewer = null;
+    if (isRecoverableWebGLError(error)) {
+      try {
+        const canvas = replaceViewerCanvas();
+        await new Promise(resolve => requestAnimationFrame(resolve));
+        state.viewer = await createViewerSession(stage, canvas);
+        state.viewer.setMeshes(meshes);
+        state.viewer.resume();
+        $("viewerLoading").classList.add("hidden");
+        return;
+      } catch (retryError) {
+        showViewerError(normalizeViewerError(retryError));
+        return;
+      }
+    }
+    showViewerError(normalizeViewerError(error));
+  }
+}
+
+function replaceViewerCanvas() {
+  const current = $("segmentationCanvas");
+  const replacement = current.cloneNode(false);
+  replacement.style.display = "block";
+  current.replaceWith(replacement);
+  return replacement;
+}
+
+function isRecoverableWebGLError(error) {
+  return /precision|webgl|context/i.test(error?.message || "");
+}
+
+function normalizeViewerError(error) {
+  if (isRecoverableWebGLError(error)) {
+    return new Error("WebGL không thể khởi tạo lại sau inference. Hãy tải lại trang và kiểm tra Hardware Acceleration của trình duyệt.");
+  }
+  return error;
+}
+
+async function createViewerSession(stage, canvas) {
+  const THREE = await import("/vendor/three.module.js");
+  const { OrbitControls } = await import("/vendor/OrbitControls.js");
+  const renderer = new THREE.WebGLRenderer({
+    canvas,
+    antialias: true,
+    alpha: false,
+    preserveDrawingBuffer: false,
+  });
+  if (renderer.getContext().isContextLost()) {
+    renderer.dispose();
+    throw new Error("WebGL context was lost before the 3D scene initialized.");
+  }
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+  renderer.setClearColor(0xe9efec, 1);
+
+  const scene = new THREE.Scene();
+  const camera = new THREE.PerspectiveCamera(38, 1, 0.01, 100);
+  camera.position.set(2.8, 2.1, 3.1);
+  const controls = new OrbitControls(camera, renderer.domElement);
+  controls.enableDamping = true;
+  controls.autoRotate = $("rotateToggle").checked;
+  controls.autoRotateSpeed = 1.15;
+  controls.target.set(0, 0, 0);
+
+  scene.add(new THREE.HemisphereLight(0xffffff, 0x466158, 2.0));
+  const keyLight = new THREE.DirectionalLight(0xffffff, 2.4);
+  keyLight.position.set(3, 4, 5);
+  scene.add(keyLight);
+  const rimLight = new THREE.DirectionalLight(0x7fc8ba, 1.8);
+  rimLight.position.set(-4, 1, -2);
+  scene.add(rimLight);
+
+  const meshByLabel = new Map();
+  let frameId = null;
+  let running = false;
+
+  const clearMeshes = () => {
+    meshByLabel.forEach(mesh => {
+      scene.remove(mesh);
+      mesh.geometry.dispose();
+      mesh.material.dispose();
     });
-    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
-    renderer.setClearColor(0xe9efec, 1);
-    const scene = new THREE.Scene();
-    const camera = new THREE.PerspectiveCamera(38, 1, 0.01, 100);
-    camera.position.set(2.8, 2.1, 3.1);
-    const controls = new OrbitControls(camera, renderer.domElement);
-    controls.enableDamping = true;
-    controls.autoRotate = true;
-    controls.autoRotateSpeed = 1.15;
-    controls.target.set(0, 0, 0);
+    meshByLabel.clear();
+    renderer.renderLists.dispose();
+  };
 
-    scene.add(new THREE.HemisphereLight(0xffffff, 0x466158, 2.0));
-    const keyLight = new THREE.DirectionalLight(0xffffff, 2.4);
-    keyLight.position.set(3, 4, 5);
-    scene.add(keyLight);
-    const rimLight = new THREE.DirectionalLight(0x7fc8ba, 1.8);
-    rimLight.position.set(-4, 1, -2);
-    scene.add(rimLight);
-
-    const meshByLabel = new Map();
+  const setMeshes = meshes => {
+    clearMeshes();
     meshes.forEach(data => {
       if (!data.vertices.length || !data.faces.length) return;
       const geometry = new THREE.BufferGeometry();
@@ -299,6 +453,7 @@ async function initViewer(meshes) {
         transparent: true,
         opacity: data.opacity,
         depthWrite: !isBrain,
+        wireframe: $("wireframeToggle").checked,
         side: THREE.DoubleSide,
       });
       const mesh = new THREE.Mesh(geometry, material);
@@ -306,64 +461,88 @@ async function initViewer(meshes) {
       scene.add(mesh);
       meshByLabel.set(String(data.label), mesh);
     });
-
     if (!meshByLabel.has("brain")) throw new Error("Không tạo được bề mặt não từ brain mask.");
 
-    const resize = () => {
-      const width = stage.clientWidth;
-      const height = stage.clientHeight;
-      renderer.setSize(width, height, false);
-      camera.aspect = width / Math.max(height, 1);
-      camera.updateProjectionMatrix();
-    };
-    const observer = new ResizeObserver(resize);
-    observer.observe(stage);
-    resize();
+    document.querySelectorAll("#classToggles input").forEach(input => {
+      input.onchange = () => {
+        const mesh = meshByLabel.get(input.dataset.label);
+        if (mesh) mesh.visible = input.checked;
+      };
+    });
+  };
 
-    let frameId;
-    const animate = () => {
-      controls.update();
-      renderer.render(scene, camera);
-      frameId = requestAnimationFrame(animate);
-    };
+  const resize = () => {
+    const width = stage.clientWidth;
+    const height = stage.clientHeight;
+    renderer.setSize(width, height, false);
+    camera.aspect = width / Math.max(height, 1);
+    camera.updateProjectionMatrix();
+  };
+  const observer = new ResizeObserver(resize);
+  observer.observe(stage);
+  resize();
+
+  const animate = () => {
+    if (!running) return;
+    controls.update();
+    renderer.render(scene, camera);
+    frameId = requestAnimationFrame(animate);
+  };
+  const resume = () => {
+    if (running) return;
+    running = true;
     animate();
+  };
+  const suspend = () => {
+    running = false;
+    if (frameId !== null) cancelAnimationFrame(frameId);
+    frameId = null;
+    clearMeshes();
+    renderer.clear();
+  };
 
-    document.querySelectorAll("#classToggles input").forEach(input => input.addEventListener("change", () => {
-      const mesh = meshByLabel.get(input.dataset.label);
-      if (mesh) mesh.visible = input.checked;
-    }));
-    $("opacityRange").oninput = (event) => {
-      const opacity = Number(event.target.value) / 100;
-      $("opacityOutput").textContent = `${event.target.value}%`;
-      meshByLabel.forEach((mesh, label) => {
-        if (label !== "brain") mesh.material.opacity = opacity;
-      });
-    };
-    $("rotateToggle").onchange = (event) => { controls.autoRotate = event.target.checked; };
-    $("wireframeToggle").onchange = (event) => meshByLabel.forEach(mesh => { mesh.material.wireframe = event.target.checked; });
-    $("resetViewButton").onclick = () => {
-      camera.position.set(2.8, 2.1, 3.1);
-      controls.target.set(0, 0, 0);
-      controls.update();
-    };
+  $("opacityRange").oninput = event => {
+    const opacity = Number(event.target.value) / 100;
+    $("opacityOutput").textContent = `${event.target.value}%`;
+    meshByLabel.forEach((mesh, label) => {
+      if (label !== "brain") mesh.material.opacity = opacity;
+    });
+  };
+  $("rotateToggle").onchange = event => { controls.autoRotate = event.target.checked; };
+  $("wireframeToggle").onchange = event => meshByLabel.forEach(mesh => { mesh.material.wireframe = event.target.checked; });
+  $("resetViewButton").onclick = () => {
+    camera.position.set(2.8, 2.1, 3.1);
+    controls.target.set(0, 0, 0);
+    controls.update();
+  };
 
-    $("viewerLoading").classList.add("hidden");
-    state.viewer = {
-      dispose() {
-        cancelAnimationFrame(frameId);
-        observer.disconnect();
-        controls.dispose();
-        meshByLabel.forEach(mesh => { mesh.geometry.dispose(); mesh.material.dispose(); });
-        renderer.dispose();
-      },
-    };
-  } catch (error) {
-    showViewerError(error);
-  }
+  return {
+    setMeshes,
+    resume,
+    suspend,
+    isContextLost() {
+      return renderer.getContext().isContextLost();
+    },
+    dispose() {
+      suspend();
+      observer.disconnect();
+      controls.dispose();
+      renderer.dispose();
+    },
+  };
 }
 
 els.sampleButton.addEventListener("click", loadSample);
 els.diagnoseButton.addEventListener("click", diagnose);
+els.modelPickerButton.addEventListener("click", () => {
+  setModelMenuOpen(els.modelPickerButton.getAttribute("aria-expanded") !== "true");
+});
+document.addEventListener("click", event => {
+  if (!event.target.closest(".model-picker")) setModelMenuOpen(false);
+});
+document.addEventListener("keydown", event => {
+  if (event.key === "Escape") setModelMenuOpen(false);
+});
 els.sliceRange.addEventListener("input", (event) => {
   els.sliceOutput.textContent = `${event.target.value} / ${event.target.max}`;
   clearTimeout(state.sliceTimer);
